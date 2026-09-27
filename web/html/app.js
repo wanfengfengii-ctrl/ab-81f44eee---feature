@@ -44,7 +44,10 @@ function renderEditors(n, values) {
   segCountEl.innerHTML = "";
   points.forEach((pts, i) => segCountEl.appendChild(makeSegmentEditor(i, pts)));
   segCountEl.querySelectorAll("input").forEach((el) =>
-    el.addEventListener("input", drawPreview));
+    el.addEventListener("input", () => {
+      drawPreview();
+      invalidateCoating("控制点已修改");
+    }));
 }
 
 function readPayload() {
@@ -187,6 +190,184 @@ function renderFail(error) {
     </div>`;
 }
 
+// ---------- anti-corrosion travel review ------------------------------------
+
+const coatingPanel = $("coatingPanel");
+const coatingEnabled = $("coatingEnabled");
+const coatingForm = $("coatingForm");
+const segmentTimesEl = $("segmentTimes");
+const vminEl = $("vmin");
+const vmaxEl = $("vmax");
+let auditSignature = "";
+
+function draftSignature(payload) {
+  return JSON.stringify({ s: payload.segments, k: payload.max_curvature });
+}
+
+function buildTimeInputs(n) {
+  segmentTimesEl.innerHTML = "";
+  for (let i = 0; i < n; i++) {
+    const cell = document.createElement("label");
+    cell.className = "time-cell";
+    cell.innerHTML =
+      `<span>第 ${i + 1} 段</span>` +
+      `<input type="number" step="1" min="1" value="1" data-seg="${i}" ` +
+      `aria-label="第 ${i + 1} 段喷涂时长">`;
+    segmentTimesEl.appendChild(cell);
+  }
+  segmentTimesEl.querySelectorAll("input").forEach((el) =>
+    el.addEventListener("input", () => invalidateCoating("走行参数已修改")));
+}
+
+function invalidateCoating(reason) {
+  const old = $("coatingResult");
+  if (old && old.children.length > 0) {
+    old.innerHTML =
+      `<div class="banner warn">⚠ ${reason}，上一条防腐走行复核结论已撤销，` +
+      `请重新发起审计并运行复核。</div>`;
+  }
+}
+
+function resetCoatingUI() {
+  auditSignature = "";
+  coatingEnabled.checked = false;
+  coatingPanel.classList.add("hidden");
+  coatingForm.classList.add("hidden");
+  const old = $("coatingResult");
+  if (old) old.innerHTML = "";
+}
+
+function validateReviewParams() {
+  const vmin = Number(vminEl.value);
+  const vmax = Number(vmaxEl.value);
+  if (!Number.isFinite(vmin) || !Number.isFinite(vmax) || vmin <= 0 || vmax <= 0) {
+    return "最小、最大允许喷涂速度必须为有限正数。";
+  }
+  if (vmin > vmax) return "最小允许喷涂速度不得大于最大允许喷涂速度。";
+  const times = [];
+  for (const el of segmentTimesEl.querySelectorAll("input")) {
+    const t = Number(el.value);
+    if (!Number.isInteger(t) || t <= 0) {
+      return `第 ${Number(el.dataset.seg) + 1} 段喷涂时长必须为正整数。`;
+    }
+    times.push(t);
+  }
+  return null;
+}
+
+function statusLabel(status) {
+  return {
+    certified: ["✓ 认证通过", "ok"],
+    too_fast: ["✗ 过快", "bad"],
+    too_slow: ["✗ 过慢", "bad"],
+    insufficient_margin: ["⚠ 余量不足", "warn"],
+    not_converged: ["⚠ 未收敛", "warn"],
+  }[status] || [status, "warn"];
+}
+
+function renderCoating(cr) {
+  const rows = cr.segments.map((s) => {
+    const [label, cls] = statusLabel(s.status);
+    return `
+    <tr>
+      <td>第 ${s.index + 1} 段</td>
+      <td class="num">${s.time}</td>
+      <td class="num">[${fmt(s.arc_length.lower, 9)}, ${fmt(s.arc_length.upper, 9)}]
+        <span class="sub">误差 ≤ ${fmt(s.arc_length.error, 3)}</span></td>
+      <td class="num">[${fmt(s.speed.lower, 9)}, ${fmt(s.speed.upper, 9)}]</td>
+      <td class="st-${cls}">${label}</td>
+    </tr>`;
+  }).join("");
+
+  let banner;
+  if (cr.certified) {
+    banner = `<div class="banner pass">✓ 防腐走行复核认证通过：各段推导出的整个速度区间均位于闭区间 ` +
+      `[${fmt(cr.min_speed)}, ${fmt(cr.max_speed)}] 内。</div>`;
+  } else {
+    const e = cr.error;
+    const name = {
+      TOO_FAST: "走行过快", TOO_SLOW: "走行过慢",
+      INSUFFICIENT_MARGIN: "安全余量不足",
+      NOT_CONVERGED: "弧长包围未收敛",
+    }[e.code] || e.code;
+    banner = `<div class="banner fail">✗ 不予认证 · 首个问题为第 ${e.segment + 1} 段（${name}）：${e.message || ""}</div>
+      <div class="detail">
+        <div class="row"><span class="k">原因代码</span><code>${e.code}</code></div>
+        <div class="row"><span class="k">速度证据</span><code>[${fmt(e.speed_lower, 9)}, ${fmt(e.speed_upper, 9)}]</code></div>
+        <div class="row"><span class="k">允许闭区间</span><code>[${fmt(e.min_speed)}, ${fmt(e.max_speed)}]</code></div>
+        <div class="row"><span class="k">弧长范围</span><code>[${fmt(e.arc_length_lower, 9)}, ${fmt(e.arc_length_upper, 9)}]</code></div>
+        <div class="row"><span class="k">建议时长窗</span><code>${
+          e.time_window_feasible
+            ? `[${fmt(e.time_window_lower, 6)}, ${fmt(e.time_window_upper, 6)}]（整数时长落入此窗可使整段速度处于限值内）`
+            : "当前弧长不确定度下无整段可行的整数时长窗，须先增加安全余量"}</code></div>
+      </div>`;
+  }
+
+  return `
+    <div id="coatingResult" class="coating-result">
+      ${banner}
+      <table>
+        <thead><tr>
+          <th>段落</th><th>喷涂时长</th><th>真实弧长范围（长度）</th>
+          <th>实际走行速度范围（长度/时间）</th><th>结论</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div class="total-line">总喷涂时长：<b>${cr.total_time}</b> 个时间单位
+        （最小/最大允许速度：${fmt(cr.min_speed)} / ${fmt(cr.max_speed)}）</div>
+      <p class="hint">弧长由服务端按三次贝塞尔连续真实弧长给出可收敛的严格上下界，
+        未使用控制多边形、屏幕绘制或固定参数采样。</p>
+    </div>`;
+}
+
+async function runCoatingReview() {
+  const payload = readPayload();
+  const localError = validateDraft(payload) || validateReviewParams();
+  if (localError) {
+    $("coatingResult").outerHTML =
+      `<div id="coatingResult"><div class="banner fail">✗ ${localError}</div></div>`;
+    return;
+  }
+  if (draftSignature(payload) !== auditSignature) {
+    $("coatingResult").outerHTML =
+      `<div id="coatingResult"><div class="banner fail">✗ 控制点或最大曲率自上次审计后已修改，请先重新“发起审计”。</div></div>`;
+    return;
+  }
+  payload.coating_review = {
+    enabled: true,
+    segment_times: [...segmentTimesEl.querySelectorAll("input")].map((el) => Number(el.value)),
+    min_speed: Number(vminEl.value),
+    max_speed: Number(vmaxEl.value),
+  };
+  const box = $("coatingResult");
+  box.innerHTML = `<div class="banner" style="color:var(--muted);border-color:var(--border);background:var(--panel-2)">正在计算各段真实弧长的严格上下界…</div>`;
+  try {
+    const res = await fetch("/api/audit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json();
+    if (!body.ok) {
+      box.innerHTML = `<div class="banner fail">✗ 审计已不再通过，请重新发起审计后再复核。</div>`;
+      resetCoatingUI();
+      return;
+    }
+    box.outerHTML = renderCoating(body.coating_review);
+  } catch (err) {
+    box.innerHTML = `<div class="banner fail">✗ 无法连接审计服务：${err.message}</div>`;
+  }
+}
+
+coatingEnabled.addEventListener("change", () => {
+  coatingForm.classList.toggle("hidden", !coatingEnabled.checked);
+  const box = $("coatingResult");
+  if (box) box.innerHTML = "";
+});
+[vminEl, vmaxEl].forEach((el) =>
+  el.addEventListener("input", () => invalidateCoating("走行参数已修改")));
+$("reviewBtn").addEventListener("click", runCoatingReview);
+
 async function runAudit() {
   const payload = readPayload();
   const localError = validateDraft(payload);
@@ -194,8 +375,10 @@ async function runAudit() {
   box.classList.remove("hidden");
   if (localError) {
     box.innerHTML = `<div class="banner fail">✗ ${localError}</div>`;
+    resetCoatingUI();
     return;
   }
+  resetCoatingUI();
   box.innerHTML = `<div class="banner" style="color:var(--muted);border-color:var(--border);background:var(--panel-2)">正在进行精确根隔离审计…</div>`;
   try {
     const res = await fetch("/api/audit", {
@@ -205,8 +388,17 @@ async function runAudit() {
     });
     const body = await res.json();
     box.innerHTML = body.ok ? renderPass(body) : renderFail(body.error);
+    if (body.ok) {
+      // Only a passing audit unlocks the anti-corrosion travel review.
+      auditSignature = draftSignature(payload);
+      coatingPanel.classList.remove("hidden");
+      buildTimeInputs(body.segments.length);
+    } else {
+      coatingPanel.classList.add("hidden");
+    }
   } catch (err) {
     box.innerHTML = `<div class="banner fail">✗ 无法连接审计服务：${err.message}</div>`;
+    resetCoatingUI();
   }
 }
 
@@ -229,14 +421,18 @@ $("sampleBtn").addEventListener("click", () => {
   $("segCount").value = SAMPLE.segments.length;
   renderEditors(SAMPLE.segments.length, SAMPLE.segments.map((s) => s.points));
   drawPreview();
+  resetCoatingUI();
 });
+$("kmax").addEventListener("input", () => invalidateCoating("走行参数已修改"));
 $("segCount").addEventListener("change", (e) => {
   let n = Math.max(2, Math.min(5, Number(e.target.value) || 2));
   e.target.value = n;
   renderEditors(n);
   drawPreview();
+  resetCoatingUI();
 });
 
+resetCoatingUI();
 renderEditors(2, SAMPLE.segments.map((s) => s.points));
 $("kmax").value = SAMPLE.max_curvature;
 drawPreview();

@@ -21,6 +21,7 @@ from __future__ import annotations
 from fractions import Fraction
 from typing import Any, Dict, List, Optional, Tuple
 
+from .coating import CoatingInputError, parse_review, review_segments
 from .geometry import Segment
 
 
@@ -80,6 +81,9 @@ def _error(code: str, message: str, segment: int, t: Any,
 
 def audit(payload: Dict[str, Any]) -> Dict[str, Any]:
     segments, kmax = build_segments(payload)
+    # Parsed up front so an invalid review block is rejected even when the
+    # geometry itself would fail; absent/disabled leaves responses untouched.
+    review_config = parse_review(payload)
     n = len(segments)
     # Fraction(str(float)) captures the exact decimal the engineer typed,
     # so the curvature comparison is exact rational arithmetic.
@@ -210,12 +214,17 @@ def audit(payload: Dict[str, Any]) -> Dict[str, Any]:
         if problem:
             return _fail(problem, segments, kmax)
 
-    return {
+    result = {
         "ok": True,
         "max_curvature": kmax,
         "error": None,
         "segments": [segment_summary(i, seg) for i, seg in enumerate(segments)],
     }
+    # The travel review is reachable only once the curvature audit has
+    # passed; failures keep the historical response shape untouched.
+    if review_config is not None:
+        result["coating_review"] = review_segments(segments, review_config)
+    return result
 
 
 def _fail(error: Dict[str, Any], segments: List[Segment],

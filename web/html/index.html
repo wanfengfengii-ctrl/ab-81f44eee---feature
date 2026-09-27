@@ -43,6 +43,35 @@
         <button id="sampleBtn" class="ghost" type="button">载入示例曲线</button>
       </div>
       <p class="hint">控制点按小车<b>行进顺序</b>填写整数坐标；草稿可随时修改后重新审计。</p>
+
+      <div id="coatingPanel" class="coating hidden">
+        <label class="switch">
+          <input type="checkbox" id="coatingEnabled" />
+          为本次合格草稿启用<b>防腐走行复核</b>
+        </label>
+        <div id="coatingForm" class="hidden">
+          <div class="speed-band">
+            <div class="field">
+              <label for="vmin">统一最小允许喷涂速度（长度/时间）</label>
+              <input id="vmin" type="number" step="any" min="0" value="1" />
+            </div>
+            <div class="field">
+              <label for="vmax">统一最大允许喷涂速度（长度/时间）</label>
+              <input id="vmax" type="number" step="any" min="0" value="5" />
+            </div>
+          </div>
+          <div class="field">
+            <label>各段喷涂时长（正整数，统一时间单位）</label>
+            <div id="segmentTimes" class="time-grid"></div>
+          </div>
+          <div class="actions">
+            <button id="reviewBtn" class="primary" type="button">运行防腐走行复核</button>
+          </div>
+          <p class="hint">弧长按三次贝塞尔<b>连续真实弧长</b>在服务端精确包围计算；
+            修改任一控制点或走行参数，结论立即撤销，须重新复核。</p>
+        </div>
+        <div id="coatingResult"></div>
+      </div>
     </section>
 
     <section class="panel viewer">

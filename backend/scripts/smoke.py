@@ -114,6 +114,97 @@ def main() -> None:
            body.get("error", {}).get("code") == "INVALID_INPUT",
            "single segment rejected with 422", str(body))
 
+    # 6. anti-corrosion travel review ------------------------------------
+    # 6a. absent block keeps the historical response shape
+    status, body = call("/api/audit",
+                        {"segments": [ARC_L, ARC_R], "max_curvature": 2.0})
+    expect("coating_review" not in body,
+           "review absent when feature not enabled", str(body)[:200])
+
+    review_block = {
+        "enabled": True, "segment_times": [1, 1],
+        "min_speed": 1.0, "max_speed": 5.0,
+    }
+    status, body = call("/api/audit", {
+        "segments": [ARC_L, ARC_R], "max_curvature": 2.0,
+        "coating_review": review_block})
+    cr = body.get("coating_review") or {}
+    expect(status == 200 and cr.get("certified") is True,
+           "review certifies an in-band plan", str(cr)[:300])
+    segs = cr.get("segments", [])
+    expect(len(segs) == 2 and cr.get("total_time") == 2,
+           "review reports per-segment records and total time", str(cr)[:300])
+    for i, s in enumerate(segs):
+        al = s.get("arc_length", {})
+        sp = s.get("speed", {})
+        expect(isinstance(al.get("lower"), (int, float)) and
+               0 < al["lower"] <= al.get("upper", 0.0) and
+               al.get("error", 1.0) >= 0 and
+               sp.get("lower", 0.0) >= 1.0 and
+               sp.get("upper", 9.0) <= 5.0,
+               f"segment {i} shows convergent arc-length/speed enclosures",
+               str(s)[:200])
+    # true arc length of the arc must beat its chord (3) and stay under
+    # its control-polygon perimeter (~6.4)
+    l0 = segs[0]["arc_length"]
+    expect(3.0 < l0["lower"] and l0["upper"] < 6.5,
+           "certified arc length respects chord/polygon bounds", str(l0))
+
+    # 6b. too fast (whole derived interval above the band)
+    _, body = call("/api/audit", {
+        "segments": [ARC_L, ARC_R], "max_curvature": 2.0,
+        "coating_review": {**review_block,
+                           "min_speed": 0.1, "max_speed": 1.0}})
+    err = (body.get("coating_review") or {}).get("error") or {}
+    expect(err.get("code") == "TOO_FAST" and err.get("segment") == 0 and
+           err.get("speed_lower", 0.0) > err.get("max_speed", 0.0),
+           "too-fast plan names the first segment with speed evidence",
+           str(err))
+
+    # 6c. too slow
+    _, body = call("/api/audit", {
+        "segments": [ARC_L, ARC_R], "max_curvature": 2.0,
+        "coating_review": {"enabled": True, "segment_times": [100, 100],
+                           "min_speed": 1.0, "max_speed": 5.0}})
+    err = (body.get("coating_review") or {}).get("error") or {}
+    expect(err.get("code") == "TOO_SLOW" and
+           err.get("speed_upper", 9.0) < err.get("min_speed", 0.0),
+           "too-slow plan rejected with speed evidence", str(err))
+
+    # 6d. straddling a limit -> insufficient margin
+    _, body = call("/api/audit", {
+        "segments": [ARC_L, ARC_R], "max_curvature": 2.0,
+        "coating_review": {**review_block, "min_speed": 1e-9,
+                           "max_speed": 3.1834899612}})
+    err = (body.get("coating_review") or {}).get("error") or {}
+    expect(err.get("code") == "INSUFFICIENT_MARGIN",
+           "limit-straddling interval demands safety margin", str(err))
+
+    # 6e. earliest segment reported in travel order (seg 1 slow, seg 0 ok)
+    _, body = call("/api/audit", {
+        "segments": [ARC_L, ARC_R], "max_curvature": 2.0,
+        "coating_review": {"enabled": True, "segment_times": [1, 1000],
+                           "min_speed": 1.0, "max_speed": 5.0}})
+    err = (body.get("coating_review") or {}).get("error") or {}
+    expect(err.get("code") == "TOO_SLOW" and err.get("segment") == 1,
+           "first uncertifiable segment reported in segment order", str(err))
+
+    # 6f. invalid review block -> 422
+    status, body = call("/api/audit", {
+        "segments": [ARC_L, ARC_R], "max_curvature": 2.0,
+        "coating_review": {"enabled": True, "segment_times": [1.5, 1],
+                           "min_speed": 1.0, "max_speed": 5.0}})
+    expect(status == 422 and
+           body.get("error", {}).get("code") == "INVALID_INPUT",
+           "non-integer spraying time rejected with 422", str(body))
+
+    # 6g. review is never attached to a failed audit
+    status, body = call("/api/audit", {
+        "segments": [PIN_L, PIN_R], "max_curvature": 1.0,
+        "coating_review": review_block})
+    expect(body.get("ok") is False and "coating_review" not in body,
+           "failed audit carries no review", str(body)[:200])
+
     print("\nALL SMOKE CHECKS PASSED")
 
 

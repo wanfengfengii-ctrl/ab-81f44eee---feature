@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from .audit import AuditInputError, audit
+from .coating import CoatingInputError
 
 app = FastAPI(title="岸桥小车导轨拼接曲线审计", version="1.0.0")
 
@@ -22,7 +23,7 @@ def health() -> Dict[str, str]:
 def run_audit(payload: Dict[str, Any]) -> JSONResponse:
     try:
         result = audit(payload)
-    except AuditInputError as exc:
+    except (AuditInputError, CoatingInputError) as exc:
         return JSONResponse(
             status_code=422,
             content={"ok": False, "error": {
