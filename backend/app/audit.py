@@ -22,6 +22,7 @@ from fractions import Fraction
 from typing import Any, Dict, List, Optional, Tuple
 
 from .geometry import Segment
+from .coating import coating_review, parse_coating
 
 
 class AuditInputError(ValueError):
@@ -210,12 +211,22 @@ def audit(payload: Dict[str, Any]) -> Dict[str, Any]:
         if problem:
             return _fail(problem, segments, kmax)
 
-    return {
+    result = {
         "ok": True,
         "max_curvature": kmax,
         "error": None,
         "segments": [segment_summary(i, seg) for i, seg in enumerate(segments)],
     }
+
+    # 防腐走行复核 can only be enabled once the curvature audit itself has
+    # passed; the request carries the opt-in and the travel parameters.
+    block = payload.get("coating")
+    enabled = isinstance(block, dict) and block.get("enabled") is True
+    if enabled:
+        params = parse_coating(block, n)
+        result["coating"] = coating_review(segments, params)
+
+    return result
 
 
 def _fail(error: Dict[str, Any], segments: List[Segment],

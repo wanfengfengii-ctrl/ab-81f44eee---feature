@@ -39,12 +39,29 @@ function defaultPoints(n) {
   return segs;
 }
 
+function renderDurationRows(n) {
+  const box = $("durationRows");
+  box.innerHTML = "";
+  for (let i = 0; i < n; i++) {
+    const row = document.createElement("div");
+    row.className = "dur-row";
+    row.innerHTML =
+      `<span>第 ${i + 1} 段喷涂时长</span>` +
+      `<input type="number" step="1" min="1" data-seg="${i}"` +
+      ` placeholder="正整数" aria-label="第${i + 1}段喷涂时长" />`;
+    box.appendChild(row);
+  }
+  box.querySelectorAll("input").forEach((el) =>
+    el.addEventListener("input", invalidateCoating));
+}
+
 function renderEditors(n, values) {
   const points = values || defaultPoints(n);
   segCountEl.innerHTML = "";
   points.forEach((pts, i) => segCountEl.appendChild(makeSegmentEditor(i, pts)));
   segCountEl.querySelectorAll("input").forEach((el) =>
-    el.addEventListener("input", drawPreview));
+    el.addEventListener("input", onGeometryEdit));
+  renderDurationRows(n);
 }
 
 function readPayload() {
@@ -56,7 +73,17 @@ function readPayload() {
     });
     return { points: pts };
   });
-  return { segments, max_curvature: Number($("kmax").value) };
+  const payload = { segments, max_curvature: Number($("kmax").value) };
+  if ($("coatingEnabled").checked) {
+    payload.coating = {
+      enabled: true,
+      spray_durations: [...$("durationRows").querySelectorAll("input")]
+        .map((el) => Number(el.value)),
+      min_speed: Number($("vmin").value),
+      max_speed: Number($("vmax").value),
+    };
+  }
+  return payload;
 }
 
 function isValidInteger(v) {
@@ -74,7 +101,49 @@ function validateDraft(payload) {
       }
     }
   }
+  if (payload.coating) {
+    const c = payload.coating;
+    if (c.spray_durations.length !== payload.segments.length ||
+        c.spray_durations.some((d) => !isValidInteger(d) || d <= 0)) {
+      return "每段喷涂时长必须填写正整数。";
+    }
+    if (!Number.isFinite(c.min_speed) || !Number.isFinite(c.max_speed) ||
+        c.min_speed <= 0 || c.max_speed <= 0 ||
+        c.min_speed > c.max_speed) {
+      return "请填写 0 < 最小速度 ≤ 最大速度 的有限正数。";
+    }
+  }
   return null;
+}
+
+// ---------- conclusion invalidation ----------------------------------------
+
+function invalidateAudit(msg) {
+  const toggle = $("coatingEnabled");
+  toggle.checked = false;
+  toggle.disabled = true;
+  $("coatingFields").classList.add("hidden");
+  // A geometry edit also voids every displayed conclusion.
+  invalidateCoating();
+  const box = $("result");
+  if (msg && !box.classList.contains("hidden")) {
+    box.innerHTML = `<div class="banner fail">✗ ${msg}</div>`;
+  }
+}
+
+function invalidateCoating() {
+  const existing = $("coatingResult");
+  if (existing) existing.remove();
+}
+
+function onGeometryEdit() {
+  invalidateAudit("草稿已修改：曲率审计与防腐走行复核结论均已撤销，请重新发起审计。");
+  drawPreview();
+}
+
+function onTravelParamEdit() {
+  // Only the coating conclusion is voided; the curvature audit stands.
+  invalidateCoating();
 }
 
 // ---------- SVG preview (display only; never used for audit decisions) ----
@@ -158,6 +227,52 @@ function renderPass(result) {
     </table>`;
 }
 
+function renderCoating(c) {
+  const bannerClass = c.certified ? "pass" : "fail";
+  const title = c.certified
+    ? `✓ 防腐走行复核已认证：各段速度区间均落入闭区间 [${fmt(c.min_speed)}, ${fmt(c.max_speed)}]`
+    : `✗ 防腐走行复核未认证（首个问题段）：${c.error.message}`;
+  const rows = c.segments.map((s) => {
+    const L = s.arc_length;
+    const status = s.certified
+      ? '<span class="tag ok">已认证</span>'
+      : '<span class="tag bad">未认证</span>';
+    return `
+    <tr class="${s.certified ? "" : "badrow"}">
+      <td>第 ${s.index + 1} 段 ${status}</td>
+      <td class="num">${fmt(s.duration)}</td>
+      <td class="num">[${fmt(L.lower, 9)}, ${fmt(L.upper, 9)}]<br/>
+        <span class="sub">误差 ≤ ${fmt(L.error, 3)}</span></td>
+      <td class="num">[${fmt(s.speed.lower, 9)}, ${fmt(s.speed.upper, 9)}]</td>
+    </tr>`;
+  }).join("");
+  const ev = c.error ? `
+    <div class="detail">
+      <div class="row"><span class="k">原因代码</span><code>${c.error.code}</code></div>
+      <div class="row"><span class="k">问题段</span><code>第 ${c.error.segment + 1} 段</code></div>
+      <div class="row"><span class="k">速度证据</span><code>[${fmt(c.error.speed_lower, 9)}, ${fmt(c.error.speed_upper, 9)}]</code></div>
+      <div class="row"><span class="k">真实弧长</span><code>[${fmt(c.error.arc_length_lower, 9)}, ${fmt(c.error.arc_length_upper, 9)}]（误差 ≤ ${fmt(c.error.arc_length_error, 3)}）</code></div>
+      <div class="row"><span class="k">喷涂时长</span><code>${c.error.duration}</code></div>
+      <div class="row"><span class="k">允许闭区间</span><code>[${fmt(c.error.min_speed)}, ${fmt(c.error.max_speed)}]</code></div>
+    </div>` : "";
+  return `
+    <div id="coatingResult" class="coating-result">
+      <div class="banner ${bannerClass}">${title}</div>
+      <table>
+        <thead><tr>
+          <th>段落</th><th>喷涂时长</th><th>真实弧长上下界</th><th>实际走行速度区间</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+        <tfoot><tr>
+          <td><b>总喷涂时长</b></td>
+          <td class="num"><b>${fmt(c.total_duration)}</b></td>
+          <td colspan="2" class="sub">速度统一限值闭区间 [${fmt(c.min_speed)}, ${fmt(c.max_speed)}]</td>
+        </tr></tfoot>
+      </table>
+      ${ev}
+    </div>`;
+}
+
 function renderFail(error) {
   const rows = [];
   const push = (k, v) => rows.push(
@@ -196,7 +311,7 @@ async function runAudit() {
     box.innerHTML = `<div class="banner fail">✗ ${localError}</div>`;
     return;
   }
-  box.innerHTML = `<div class="banner" style="color:var(--muted);border-color:var(--border);background:var(--panel-2)">正在进行精确根隔离审计…</div>`;
+  box.innerHTML = `<div class="banner" style="color:var(--muted);border-color:var(--border);background:var(--panel-2)">正在进行精确根隔离审计${payload.coating ? "与防腐走行复核（真实弧长收敛）" : ""}…</div>`;
   try {
     const res = await fetch("/api/audit", {
       method: "POST",
@@ -204,7 +319,18 @@ async function runAudit() {
       body: JSON.stringify(payload),
     });
     const body = await res.json();
-    box.innerHTML = body.ok ? renderPass(body) : renderFail(body.error);
+    if (!body.ok) {
+      invalidateAudit();
+      box.innerHTML = renderFail(body.error);
+      return;
+    }
+    state.auditOk = true;
+    const toggle = $("coatingEnabled");
+    toggle.disabled = false;
+    box.innerHTML = renderPass(body);
+    if (body.coating) {
+      box.insertAdjacentHTML("beforeend", renderCoating(body.coating));
+    }
   } catch (err) {
     box.innerHTML = `<div class="banner fail">✗ 无法连接审计服务：${err.message}</div>`;
   }
@@ -228,14 +354,28 @@ $("sampleBtn").addEventListener("click", () => {
   $("kmax").value = SAMPLE.max_curvature;
   $("segCount").value = SAMPLE.segments.length;
   renderEditors(SAMPLE.segments.length, SAMPLE.segments.map((s) => s.points));
+  invalidateAudit();
   drawPreview();
 });
 $("segCount").addEventListener("change", (e) => {
   let n = Math.max(2, Math.min(5, Number(e.target.value) || 2));
   e.target.value = n;
   renderEditors(n);
+  invalidateAudit();
   drawPreview();
 });
+$("kmax").addEventListener("input", () =>
+  invalidateAudit("最大曲率已修改：审计与复核结论均已撤销，请重新发起审计。"));
+
+$("coatingEnabled").addEventListener("change", (e) => {
+  const fields = $("coatingFields");
+  fields.classList.toggle("hidden", !e.target.checked);
+  // Switching the feature on/off withdraws any displayed verdict until a
+  // fresh request certifies it.
+  invalidateCoating();
+});
+$("vmin").addEventListener("input", onTravelParamEdit);
+$("vmax").addEventListener("input", onTravelParamEdit);
 
 renderEditors(2, SAMPLE.segments.map((s) => s.points));
 $("kmax").value = SAMPLE.max_curvature;

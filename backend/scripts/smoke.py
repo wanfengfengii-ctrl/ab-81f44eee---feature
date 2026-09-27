@@ -114,6 +114,84 @@ def main() -> None:
            body.get("error", {}).get("code") == "INVALID_INPUT",
            "single segment rejected with 422", str(body))
 
+    # 6. coating travel review ------------------------------------------------
+    coat_base = {"segments": [ARC_L, ARC_R], "max_curvature": 2.0}
+
+    # 6a. disabled: response shape stays exactly the historical audit shape
+    status, body = call("/api/audit", coat_base)
+    expect("coating" not in body, "coating absent when not enabled")
+
+    # 6b. certified plan: per-segment durations, arc-length enclosures,
+    # speed ranges and total duration are all present.
+    status, body = call("/api/audit", {**coat_base, "coating": {
+        "enabled": True, "spray_durations": [1, 1],
+        "min_speed": 3.0, "max_speed": 3.5}})
+    c = body.get("coating") or {}
+    expect(c.get("certified") is True, "coating certified inside band", str(c))
+    rows = c.get("segments", [])
+    expect(len(rows) == 2 and c.get("total_duration") == 2,
+           "coating reports 2 rows and total duration", str(c))
+    for s in rows:
+        L = s.get("arc_length", {})
+        v = s.get("speed", {})
+        expect(isinstance(L.get("lower"), (int, float)) and
+               L["lower"] > 0 and L["upper"] >= L["lower"] and
+               L.get("error", -1) >= 0 and
+               v.get("lower", 0) > 0 and v["upper"] >= v["lower"],
+               f"segment {s.get('index')} has arc bounds + speed range",
+               str(s))
+        # The speed range must come from true arc length / duration.
+        expect(abs(v["lower"] - L["lower"] / s["duration"]) < 1e-9 and
+               abs(v["upper"] - L["upper"] / s["duration"]) < 1e-9,
+               f"segment {s.get('index')} speed = arc length / duration",
+               str(s))
+
+    # 6c. whole interval outside the band -> explicit first bad segment
+    status, body = call("/api/audit", {**coat_base, "coating": {
+        "enabled": True, "spray_durations": [1, 1],
+        "min_speed": 1.0, "max_speed": 2.0}})
+    err = (body.get("coating") or {}).get("error") or {}
+    expect(err.get("code") == "SPEED_TOO_FAST" and err.get("segment") == 0,
+           "over-speed plan reports SPEED_TOO_FAST on segment 0", str(err))
+    expect(err.get("speed_lower", 0) > 2.0 and
+           err.get("arc_length_upper", 0) >= err.get("arc_length_lower", 0),
+           "over-speed error carries speed + arc-length evidence", str(err))
+
+    # 6d. interval straddles the limit -> safety margin required
+    status, body = call("/api/audit", {**coat_base, "coating": {
+        "enabled": True, "spray_durations": [1, 1],
+        "min_speed": 3.183489961116, "max_speed": 9.0}})
+    err = (body.get("coating") or {}).get("error") or {}
+    expect(err.get("code") == "MARGIN_INSUFFICIENT",
+           "limit-straddling plan requires more margin", str(err))
+
+    # 6e. later segment is the first bad one -> stable travel-order report
+    straight0 = {"points": [[0, 0], [1, 0], [2, 0], [3, 0]]}
+    straight1 = {"points": [[3, 0], [4, 0], [5, 0], [6, 0]]}
+    status, body = call("/api/audit", {
+        "segments": [straight0, straight1], "max_curvature": 10.0,
+        "coating": {"enabled": True, "spray_durations": [1, 100],
+                    "min_speed": 1.0, "max_speed": 10.0}})
+    err = (body.get("coating") or {}).get("error") or {}
+    expect(err.get("segment") == 1 and err.get("code") == "SPEED_TOO_SLOW",
+           "under-speed points at segment 1 in travel order", str(err))
+
+    # 6f. invalid coating parameters share the 422 contract
+    status, body = call("/api/audit", {**coat_base, "coating": {
+        "enabled": True, "spray_durations": [1.5, 1],
+        "min_speed": 1.0, "max_speed": 2.0}})
+    expect(status == 422 and
+           body.get("error", {}).get("code") == "INVALID_INPUT",
+           "non-integer duration rejected with 422", str(body))
+
+    # 6g. coating cannot run on a draft that fails the curvature audit
+    status, body = call("/api/audit", {
+        "segments": [PIN_L, PIN_R], "max_curvature": 1.0,
+        "coating": {"enabled": True, "spray_durations": [1, 1],
+                    "min_speed": 1.0, "max_speed": 9.0}})
+    expect(body.get("ok") is False and "coating" not in body,
+           "coating withheld until curvature audit passes", str(body)[:300])
+
     print("\nALL SMOKE CHECKS PASSED")
 
 

@@ -44,3 +44,51 @@ def test_audit_invalid_payload():
                                         "max_curvature": 1.0})
     assert r.status_code == 422
     assert r.json()["error"]["code"] == "INVALID_INPUT"
+
+
+def test_coating_disabled_is_absent():
+    r = client.post("/api/audit", json={
+        "segments": [ARC_L, ARC_R], "max_curvature": 2.0})
+    assert r.status_code == 200
+    assert "coating" not in r.json()
+
+
+def test_coating_certified_response():
+    r = client.post("/api/audit", json={
+        "segments": [ARC_L, ARC_R], "max_curvature": 2.0,
+        "coating": {"enabled": True, "spray_durations": [1, 1],
+                    "min_speed": 3.0, "max_speed": 3.5}})
+    assert r.status_code == 200
+    c = r.json()["coating"]
+    assert c["certified"] is True
+    assert c["total_duration"] == 2
+    assert all("arc_length" in s and "speed" in s for s in c["segments"])
+
+
+def test_coating_too_fast_response():
+    r = client.post("/api/audit", json={
+        "segments": [ARC_L, ARC_R], "max_curvature": 2.0,
+        "coating": {"enabled": True, "spray_durations": [1, 1],
+                    "min_speed": 1.0, "max_speed": 2.0}})
+    c = r.json()["coating"]
+    assert c["certified"] is False
+    assert c["error"]["code"] == "SPEED_TOO_FAST"
+    assert c["error"]["segment"] == 0
+
+
+def test_coating_invalid_payload_is_422():
+    r = client.post("/api/audit", json={
+        "segments": [ARC_L, ARC_R], "max_curvature": 2.0,
+        "coating": {"enabled": True, "spray_durations": [-1, 1],
+                    "min_speed": 1.0, "max_speed": 2.0}})
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "INVALID_INPUT"
+
+
+def test_coating_on_failed_audit_not_evaluated():
+    r = client.post("/api/audit", json={
+        "segments": [ARC_L, ARC_R], "max_curvature": 0.1,
+        "coating": {"enabled": True, "spray_durations": [1, 1],
+                    "min_speed": 1.0, "max_speed": 9.0}})
+    body = r.json()
+    assert body["ok"] is False and "coating" not in body
